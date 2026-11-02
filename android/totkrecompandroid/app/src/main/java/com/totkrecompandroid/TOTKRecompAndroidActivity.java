@@ -84,7 +84,8 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
     private static native String nativeSaveDir();  // (this version's save_0, absolute)
     private static native void nativeSaveDone(int result, String detail);
     private static final int REQ_GAME = 0x4c41, REQ_DRIVER = 0x4c42, REQ_MOD = 0x4c46, REQ_LOG = 0x4c47,
-            REQ_DRIVER_RECOVER = 0x4c48, REQ_SAVE_IN = 0x4c49, REQ_SAVE_OUT = 0x4c4a, REQ_SAVE_IN_TREE = 0x4c4c;
+            REQ_DRIVER_RECOVER = 0x4c48, REQ_SAVE_IN = 0x4c49, REQ_SAVE_OUT = 0x4c4a, REQ_SAVE_IN_TREE = 0x4c4c,
+            REQ_BASE_NSP = 0x4c4d, REQ_UPDATE_NSP = 0x4c4e, REQ_KEYS_FILE = 0x4c4f;
     private static TOTKRecompAndroidActivity self;
 
     @Override
@@ -274,6 +275,171 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
         importInPlace = true;
     }
 
+    // ---- NSP file import (the setup's "NSP file" source: base .nsp + update .nsp + prod.keys → exefs/ + romfs.bin) ----
+    private static volatile Uri pendingBaseNspUri;    // the picked base game .nsp
+    private static volatile Uri pendingUpdateNspUri;  // the picked update .nsp
+    private static volatile Uri pendingKeysUri;       // persisted prod.keys URI (reused across setups)
+
+    public static void pickNspFile() {
+        // Sequential flow: first pick the base game NSP
+        self.runOnUiThread(() -> {
+            try {
+                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                i.setType("*/*");
+                self.startActivityForResult(i, REQ_BASE_NSP);
+            } catch (Exception e) {
+                Log.e(TAG, "base NSP file picker: " + e);
+                nativeImportDone(1);
+            }
+        });
+    }
+
+    private static void pickUpdateNspFile() {
+        self.runOnUiThread(() -> {
+            try {
+                android.widget.Toast.makeText(self, "Now choose the update NSP", android.widget.Toast.LENGTH_LONG).show();
+                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                i.setType("*/*");
+                self.startActivityForResult(i, REQ_UPDATE_NSP);
+            } catch (Exception e) {
+                Log.e(TAG, "update NSP file picker: " + e);
+                nativeImportDone(1);
+            }
+        });
+    }
+
+    private static void pickKeysFile() {
+        self.runOnUiThread(() -> {
+            try {
+                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                i.setType("*/*");
+                self.startActivityForResult(i, REQ_KEYS_FILE);
+            } catch (Exception e) {
+                Log.e(TAG, "keys file picker: " + e);
+                nativeImportDone(1);
+            }
+        });
+    }
+
+    // Called once base NSP, update NSP, and keys are all available
+    private void importNsp(Uri baseNspUri, Uri updateNspUri, Uri keysUri) {
+        nativeImportLooking();
+        new Thread(() -> {
+            int result;
+            try {
+                android.os.ParcelFileDescriptor baseFd =
+                        getContentResolver().openFileDescriptor(baseNspUri, "r");
+                if (baseFd == null) throw new IOException("Could not open the base NSP file");
+
+                android.os.ParcelFileDescriptor updateFd =
+                        getContentResolver().openFileDescriptor(updateNspUri, "r");
+                if (updateFd == null) { baseFd.close(); throw new IOException("Could not open the update NSP file"); }
+
+                InputStream keysIn = getContentResolver().openInputStream(keysUri);
+                if (keysIn == null) { baseFd.close(); updateFd.close(); throw new IOException("Could not open prod.keys"); }
+
+                File tmp = new File(getExternalFilesDir(null), ".nsp_tmp");
+                deleteTree(tmp);
+                tmp.mkdirs();
+
+                NspExtractor.Result r = NspExtractor.extract(baseFd, updateFd, keysIn, tmp,
+                        (done, total) -> nativeImportProgress(done, total));
+                keysIn.close();
+                baseFd.close();
+                updateFd.close();
+
+                if (!r.ok) {
+                    nativeImportDetail(r.error);
+                    deleteTree(tmp);
+                    nativeImportDone(5);
+                    return;
+                }
+
+                // Check the game version from the extracted main
+                File mainFile = new File(tmp, "exefs/main");
+                if (!mainFile.exists()) {
+                    nativeImportDetail("exefs/main not found in the extracted NSP");
+                    deleteTree(tmp);
+                    nativeImportDone(2);
+                    return;
+                }
+                byte[] head = new byte[0x48];
+                try (FileInputStream fis = new FileInputStream(mainFile)) {
+                    int got = 0;
+                    for (int rd; got < head.length && (rd = fis.read(head, got, head.length - got)) > 0; ) got += rd;
+                }
+                int version = nativeGameVersion(head);
+                if (version == 0) {
+                    nativeImportDetail("The NSP doesn't contain a supported game version");
+                    deleteTree(tmp);
+                    nativeImportDone(4);
+                    return;
+                }
+
+                // Move to the right version's folder
+                String dest = nativeImportBegin("NSP import", version);
+                File destDir = new File(dest);
+
+                // Move exefs/
+                File destExefs = new File(destDir, "exefs");
+                File tmpExefs = new File(tmp, "exefs");
+                if (destExefs.exists()) deleteTree(destExefs);
+                if (!tmpExefs.renameTo(destExefs)) {
+                    copyTreeLocal(tmpExefs, destExefs);
+                    deleteTree(tmpExefs);
+                }
+
+                // Move romfs.bin
+                File tmpRomfs = new File(tmp, "romfs.bin");
+                File destRomfs = new File(destDir, "romfs.bin");
+                if (destRomfs.exists()) destRomfs.delete();
+                if (tmpRomfs.exists()) {
+                    if (!tmpRomfs.renameTo(destRomfs)) {
+                        copyFileLocal(tmpRomfs, destRomfs);
+                        tmpRomfs.delete();
+                    }
+                }
+
+                // Extract movies from romfs.bin for the launcher (keep_loose)
+                if (destRomfs.exists()) {
+                    android.os.ParcelFileDescriptor romfsFd = android.os.ParcelFileDescriptor.open(
+                            destRomfs, android.os.ParcelFileDescriptor.MODE_READ_ONLY);
+                    String failed = nativeImageLoose(romfsFd.detachFd());
+                    if (failed != null) Log.w(TAG, "romfs movies: " + failed);
+                }
+
+                deleteTree(tmp);
+                result = 0;
+            } catch (Exception e) {
+                Log.e(TAG, "NSP import: " + e);
+                nativeImportDetail(e.getClass().getSimpleName() +
+                        (e.getMessage() != null ? ": " + e.getMessage() : ""));
+                result = 5;
+            }
+            nativeImportDone(result);
+        }, "nsp-import").start();
+    }
+
+    private static void copyTreeLocal(File src, File dst) throws IOException {
+        if (src.isDirectory()) {
+            dst.mkdirs();
+            File[] kids = src.listFiles();
+            if (kids != null) for (File k : kids) copyTreeLocal(k, new File(dst, k.getName()));
+        } else {
+            copyFileLocal(src, dst);
+        }
+    }
+
+    private static void copyFileLocal(File src, File dst) throws IOException {
+        try (InputStream in = new FileInputStream(src); OutputStream o = new FileOutputStream(dst)) {
+            byte[] buf = new byte[1 << 16];
+            for (int n; (n = in.read(buf)) > 0; ) o.write(buf, 0, n);
+        }
+    }
+
     // A folder the file picker gave (its document id: "primary:Download/BOTW", "1A2B-3C4D:Games/BOTW", "raw:/storage/...")
     // as a path the native side can open, or null (a cloud provider, or no such folder)
     private static String documentPath(String id) {
@@ -382,6 +548,49 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
                 else if (req == REQ_SAVE_IN_TREE) importSave(u);
                 else exportSaveZip(u);
             }, "saves").start();
+            return;
+        }
+        if (req == REQ_BASE_NSP) {
+            Uri f = result == Activity.RESULT_OK && data != null ? data.getData() : null;
+            if (f == null) { nativeImportDone(1); return; }
+            pendingBaseNspUri = f;
+            pickUpdateNspFile(); // next: ask for the update NSP
+            return;
+        }
+        if (req == REQ_UPDATE_NSP) {
+            Uri f = result == Activity.RESULT_OK && data != null ? data.getData() : null;
+            if (f == null) { nativeImportDone(1); return; }
+            pendingUpdateNspUri = f;
+            // Now check for prod.keys
+            if (pendingKeysUri != null) {
+                importNsp(pendingBaseNspUri, pendingUpdateNspUri, pendingKeysUri);
+            } else {
+                File localKeys = new File(getExternalFilesDir(null), "prod.keys");
+                if (localKeys.exists()) {
+                    pendingKeysUri = Uri.fromFile(localKeys);
+                    importNsp(pendingBaseNspUri, pendingUpdateNspUri, pendingKeysUri);
+                } else {
+                    pickKeysFile();
+                }
+            }
+            return;
+        }
+        if (req == REQ_KEYS_FILE) {
+            Uri f = result == Activity.RESULT_OK && data != null ? data.getData() : null;
+            if (f == null) { nativeImportDone(1); return; }
+            pendingKeysUri = f;
+            // Copy keys to local storage for reuse
+            try {
+                File localKeys = new File(getExternalFilesDir(null), "prod.keys");
+                try (InputStream in = getContentResolver().openInputStream(f)) {
+                    copy(in, localKeys);
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "couldn't save prod.keys locally: " + e);
+            }
+            if (pendingBaseNspUri != null && pendingUpdateNspUri != null) {
+                importNsp(pendingBaseNspUri, pendingUpdateNspUri, pendingKeysUri);
+            }
             return;
         }
         if (req == REQ_LOG) {

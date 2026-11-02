@@ -2105,8 +2105,24 @@ extern "C" void launcher_run(const char *root) {
                 // the folder: this version's files when they aren't set up, else another version's (or this one's again)
                 opt_section("Your copy of the game");
 #ifdef __ANDROID__
+                {   // source: folder (exefs + romfs) or NSP file
+                    static const char *const sources[] = {"Folder (exefs + romfs)", "NSP file"};
+                    int s = g_settings.files_from_nsp ? 1 : 0;
+                    if (busy) opt_disable_next();
+                    opt_choice("Source", &s, sources, 2, 0,
+                               "Folder (exefs + romfs): choose the folder with the extracted game files (exefs/ and "
+                               "romfs/, or exefs/ and a romfs.bin).\n\n"
+                               "NSP file: choose the base game NSP and the update NSP (v1.4.3). You also need a "
+                               "prod.keys file with your console's keys - TOTKDroid will ask for it the first time, "
+                               "and keep it for later.");
+                    if ((s == 1) != g_settings.files_from_nsp) {
+                        g_settings.files_from_nsp = s == 1;
+                        settings_save();
+                    }
+                }
                 // (no "Game code" choice: the game's own code always runs on the CPU - runtime/native.c native_wanted)
-                {   // copied, or read where they are (the romfs/: services/fs.c romfs.link; the exefs/ is copied, small)
+                if (!g_settings.files_from_nsp) {
+                    // copied, or read where they are (the romfs/: services/fs.c romfs.link; the exefs/ is copied, small)
                     static const char *const ways[] = {"Copy them", "Use them in place"};
                     int w = g_settings.files_in_place ? 1 : 0;
                     if (busy) opt_disable_next();
@@ -2124,8 +2140,17 @@ extern "C" void launcher_run(const char *root) {
 #endif
                 if (busy) opt_disable_next();
 #ifdef __ANDROID__
-                if (opt_action("Game files folder", src_v.c_str(), src_d.c_str(), true))
-                    android_call(g_settings.files_in_place ? "pickGameFolderInPlace" : "pickGameFolder");
+                if (g_settings.files_from_nsp) {
+                    if (opt_action("NSP files", src_v.c_str(),
+                                   "Choose the base game NSP and the update NSP (v1.4.3) of The Legend of Zelda: "
+                                   "Tears of the Kingdom. TOTKDroid will ask for each one in turn, then decrypt and "
+                                   "extract the game files using your prod.keys.\n\n"
+                                   "The game isn't included with TOTKDroid.", true))
+                        android_call("pickNspFile");
+                } else {
+                    if (opt_action("Game files folder", src_v.c_str(), src_d.c_str(), true))
+                        android_call(g_settings.files_in_place ? "pickGameFolderInPlace" : "pickGameFolder");
+                }
 #else
                 if (opt_action("Game files folder", src_v.c_str(), src_d.c_str(), true))
                     SDL_ShowOpenFolderDialog(picked, NULL, win, NULL, false);

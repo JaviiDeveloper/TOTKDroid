@@ -239,6 +239,7 @@ void settings_load(void) {
         else if (!strcmp(key, "shader_int32")) g_settings.shader_int32 = atoi(val) != 0;
         else if (!strcmp(key, "sync_lag")) g_settings.sync_lag = atoi(val) != 0;
         else if (!strcmp(key, "files_in_place")) g_settings.files_in_place = atoi(val) != 0;
+        else if (!strcmp(key, "files_from_nsp")) g_settings.files_from_nsp = atoi(val) != 0;
         else if (!strcmp(key, "native_code")) g_settings.native_code = atoi(val) != 0;
         else if (!strcmp(key, "gpu_heap")) g_settings.gpu_heap = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
         else if (!strcmp(key, "inplace_reads")) g_settings.inplace_reads = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
@@ -319,8 +320,9 @@ void settings_save(void) {
 #ifdef __ANDROID__
     fprintf(f, "touch_controls = %d\n", g_settings.touch_controls);
     fprintf(f, "frame_rate = %s\n", g_settings.fps_mode == 1 ? "30" : g_settings.fps_mode == 2 ? "60" : "auto");
-    fprintf(f, "shader_int32 = %d\nsync_lag = %d\nfiles_in_place = %d\nnative_code = %d\n", g_settings.shader_int32,
-            g_settings.sync_lag, g_settings.files_in_place, g_settings.native_code);
+    fprintf(f, "shader_int32 = %d\nsync_lag = %d\nfiles_in_place = %d\nfiles_from_nsp = %d\nnative_code = %d\n",
+            g_settings.shader_int32, g_settings.sync_lag, g_settings.files_in_place, g_settings.files_from_nsp,
+            g_settings.native_code);
     static const char *const tri[] = {"auto", "0", "1"};  // (-1 / 0 / 1)
 #define TRI(v) tri[(v) < 0 ? 0 : (v) ? 2 : 1]
     fprintf(f, "gpu_heap = %s\ninplace_reads = %s\nturnip_lrz = %s\nlog_file = %d\ngpu_model = %s\n", TRI(g_settings.gpu_heap),
