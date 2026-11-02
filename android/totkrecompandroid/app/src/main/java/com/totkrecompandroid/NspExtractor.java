@@ -22,9 +22,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -51,19 +51,19 @@ public class NspExtractor {
         long size;
     }
 
-    static List<Pfs0Entry> parsePfs0(RandomAccessFile f, long base) throws IOException {
-        f.seek(base);
+    static List<Pfs0Entry> parsePfs0(FileChannel f, long base) throws IOException {
+        f.position(base);
         byte[] head = new byte[16];
-        if (f.read(head) != 16) throw new IOException("PFS0: too short");
+        if (readFully(f, head) != 16) throw new IOException("PFS0: too short");
         if (head[0] != 'P' || head[1] != 'F' || head[2] != 'S' || head[3] != '0')
             throw new IOException("Not a PFS0 container");
         ByteBuffer hb = ByteBuffer.wrap(head).order(ByteOrder.LITTLE_ENDIAN);
         int nFiles = hb.getInt(4);
         int strSize = hb.getInt(8);
         byte[] table = new byte[nFiles * 24];
-        if (f.read(table) != table.length) throw new IOException("PFS0: entry table truncated");
+        if (readFully(f, table) != table.length) throw new IOException("PFS0: entry table truncated");
         byte[] strings = new byte[strSize];
-        if (f.read(strings) != strings.length) throw new IOException("PFS0: string table truncated");
+        if (readFully(f, strings) != strings.length) throw new IOException("PFS0: string table truncated");
         long dataBase = base + 16 + (long) nFiles * 24 + strSize;
         List<Pfs0Entry> entries = new ArrayList<>();
         ByteBuffer tb = ByteBuffer.wrap(table).order(ByteOrder.LITTLE_ENDIAN);
@@ -83,14 +83,14 @@ public class NspExtractor {
 
     // ---- Tickets (title keys) ----
 
-    static Map<String, byte[]> readTickets(RandomAccessFile f, List<Pfs0Entry> nspEntries) throws IOException {
+    static Map<String, byte[]> readTickets(FileChannel f, List<Pfs0Entry> nspEntries) throws IOException {
         Map<String, byte[]> keys = new HashMap<>(); // rights_id_hex -> title_key (encrypted)
         for (Pfs0Entry e : nspEntries) {
             if (!e.name.endsWith(".tik")) continue;
             if (e.size < 0x2B0) continue;
-            f.seek(e.offset);
+            f.position(e.offset);
             byte[] tik = new byte[(int) Math.min(e.size, 0x400)];
-            f.read(tik);
+            readFully(f, tik);
             ByteBuffer tb = ByteBuffer.wrap(tik).order(ByteOrder.LITTLE_ENDIAN);
             int sigType = tb.getInt(0);
             if (sigType != 0x10004) continue; // RSA-2048 SHA-256 (common ticket)
@@ -279,7 +279,7 @@ public class NspExtractor {
 
     // ---- AES-128-CTR decryption of an NCA section ----
 
-    static void decryptSectionCtr(RandomAccessFile f, long ncaBase, NcaHeader nca, int sectionIdx,
+    static void decryptSectionCtr(FileChannel f, long ncaBase, NcaHeader nca, int sectionIdx,
                                   byte[] decKey, long innerOffset, long size, OutputStream out,
                                   Progress progress, long[] progressState) throws Exception {
         int startMedia = nca.sections[sectionIdx][0];
@@ -293,7 +293,7 @@ public class NspExtractor {
         // For AES-CTR in NCAs: IV = [section_ctr_upper (8 bytes BE)] [offset_within_section / 0x10 (8 bytes BE)]
         long readOffset = innerOffset;
         long absOffset = sectionAbsStart + readOffset;
-        f.seek(absOffset);
+        f.position(absOffset);
 
         byte[] iv = new byte[16];
         // Upper 8 bytes: the generation/secure value, stored big-endian
@@ -315,7 +315,7 @@ public class NspExtractor {
         long remaining = size;
         while (remaining > 0) {
             int toRead = (int) Math.min(buf.length, remaining);
-            int read = f.read(buf, 0, toRead);
+            int read = readFully(f, buf, 0, toRead);
             if (read <= 0) throw new IOException("Unexpected EOF in NCA section");
             byte[] dec = cipher.update(buf, 0, read);
             if (dec != null) out.write(dec);
@@ -331,7 +331,7 @@ public class NspExtractor {
 
     // ---- Extract exefs (PFS0 inside the section) ----
 
-    static void extractExefs(RandomAccessFile f, long ncaBase, NcaHeader nca, int sectionIdx,
+    static void extractExefs(FileChannel f, long ncaBase, NcaHeader nca, int sectionIdx,
                              byte[] decKey, File outDir, Progress progress, long[] progressState) throws Exception {
         FsHeader fs = parseFsHeader(nca.fsHeaders, sectionIdx);
         if (fs == null) throw new IOException("No FS header for exefs section");
@@ -380,7 +380,7 @@ public class NspExtractor {
 
     // ---- Extract romfs section (write as romfs.bin, the raw decrypted RomFS image) ----
 
-    static void extractRomfs(RandomAccessFile f, long ncaBase, NcaHeader nca, int sectionIdx,
+    static void extractRomfs(FileChannel f, long ncaBase, NcaHeader nca, int sectionIdx,
                              byte[] decKey, File outFile, Progress progress, long[] progressState) throws Exception {
         FsHeader fs = parseFsHeader(nca.fsHeaders, sectionIdx);
         if (fs == null) throw new IOException("No FS header for romfs section");
@@ -500,12 +500,12 @@ public class NspExtractor {
     }
 
     // AES-CTR decryption with an explicit CTR generation override (for AesCtrEx sections)
-    static void decryptSectionCtrGen(RandomAccessFile f, long ncaBase, NcaHeader nca, int sectionIdx,
+    static void decryptSectionCtrGen(FileChannel f, long ncaBase, NcaHeader nca, int sectionIdx,
                                      byte[] decKey, long innerOffset, long size, int ctrGeneration,
                                      OutputStream out, Progress progress, long[] progressState) throws Exception {
         int startMedia = nca.sections[sectionIdx][0];
         long sectionAbsStart = ncaBase + (long) startMedia * MEDIA_UNIT;
-        f.seek(sectionAbsStart + innerOffset);
+        f.position(sectionAbsStart + innerOffset);
 
         byte[] iv = new byte[16];
         ByteBuffer fsRaw = ByteBuffer.wrap(nca.fsHeaders).order(ByteOrder.BIG_ENDIAN);
@@ -528,7 +528,7 @@ public class NspExtractor {
         long remaining = size;
         while (remaining > 0) {
             int toRead = (int) Math.min(buf.length, remaining);
-            int read = f.read(buf, 0, toRead);
+            int read = readFully(f, buf, 0, toRead);
             if (read <= 0) throw new IOException("Unexpected EOF in NCA section");
             byte[] dec = cipher.update(buf, 0, read);
             if (dec != null) out.write(dec);
@@ -544,8 +544,8 @@ public class NspExtractor {
 
     // Extract romfs via BKTR: the update NCA's romfs section is a delta against the base NCA's romfs
     static void extractRomfsBktr(
-            RandomAccessFile baseFile, long baseNcaOff, NcaHeader baseNca, int baseSection, byte[] baseKey,
-            RandomAccessFile updateFile, long updateNcaOff, NcaHeader updateNca, int updateSection, byte[] updateKey,
+            FileChannel baseFile, long baseNcaOff, NcaHeader baseNca, int baseSection, byte[] baseKey,
+            FileChannel updateFile, long updateNcaOff, NcaHeader updateNca, int updateSection, byte[] updateKey,
             File outFile, Progress progress, long[] progressState) throws Exception {
 
         FsHeader updateFs = parseFsHeader(updateNca.fsHeaders, updateSection);
@@ -632,7 +632,7 @@ public class NspExtractor {
         boolean hasBktrRomfs; // true if the romfs section uses BKTR (= update NCA)
     }
 
-    private static List<ProgramNca> findProgramNcas(RandomAccessFile raf, long base,
+    private static List<ProgramNca> findProgramNcas(FileChannel raf, long base,
             byte[] headerKey, Map<String, byte[]> prodKeys, Map<String, byte[]> titleKeys) throws Exception {
         List<Pfs0Entry> entries = parsePfs0(raf, base);
         Log.i(TAG, "NSP: " + entries.size() + " entries");
@@ -643,9 +643,9 @@ public class NspExtractor {
         List<ProgramNca> ncas = new ArrayList<>();
         for (Pfs0Entry e : entries) {
             if (!e.name.endsWith(".nca") || e.name.endsWith(".cnmt.nca")) continue;
-            raf.seek(e.offset);
+            raf.position(e.offset);
             byte[] encHeader = new byte[0xC00];
-            if (raf.read(encHeader) != encHeader.length) continue;
+            if (readFully(raf, encHeader) != encHeader.length) continue;
             byte[] decHeader;
             try { decHeader = aesXtsDecrypt(encHeader, headerKey, 0, MEDIA_UNIT); }
             catch (Exception ex) { Log.w(TAG, "Can't decrypt header of " + e.name + ": " + ex); continue; }
@@ -676,7 +676,7 @@ public class NspExtractor {
         Result result = new Result();
         File exefsDir = new File(destDir, "exefs");
         File romfsFile = new File(destDir, "romfs.bin");
-        RandomAccessFile baseRaf = null, updateRaf = null;
+        FileChannel baseRaf = null, updateRaf = null;
         try {
             Map<String, byte[]> keys = parseKeys(keysStream);
             byte[] headerKey = keys.get("header_key");
@@ -685,13 +685,12 @@ public class NspExtractor {
 
             Map<String, byte[]> titleKeys = new HashMap<>();
 
-            // Open and scan the base NSP
-            baseRaf = new RandomAccessFile(new File("/proc/self/fd/" + baseNspFd.getFd()), "r");
+            // Open NSPs via FileChannel (SAF content:// fds don't support /proc/self/fd/ access)
+            baseRaf = new FileInputStream(baseNspFd.getFileDescriptor()).getChannel();
             Log.i(TAG, "Scanning base NSP...");
             List<ProgramNca> baseNcas = findProgramNcas(baseRaf, 0, headerKey, keys, titleKeys);
 
-            // Open and scan the update NSP
-            updateRaf = new RandomAccessFile(new File("/proc/self/fd/" + updateNspFd.getFd()), "r");
+            updateRaf = new FileInputStream(updateNspFd.getFileDescriptor()).getChannel();
             Log.i(TAG, "Scanning update NSP...");
             List<ProgramNca> updateNcas = findProgramNcas(updateRaf, 0, headerKey, keys, titleKeys);
 
@@ -837,6 +836,22 @@ public class NspExtractor {
         for (int i = 0; i < len; i++)
             out[i] = (byte) Integer.parseInt(s.substring(i * 2, i * 2 + 2), 16);
         return out;
+    }
+
+    // FileChannel read helpers (FileChannel.read takes ByteBuffer, not byte[])
+    private static int readFully(FileChannel ch, byte[] buf) throws IOException {
+        return readFully(ch, buf, 0, buf.length);
+    }
+
+    private static int readFully(FileChannel ch, byte[] buf, int off, int len) throws IOException {
+        ByteBuffer bb = ByteBuffer.wrap(buf, off, len);
+        int total = 0;
+        while (bb.hasRemaining()) {
+            int n = ch.read(bb);
+            if (n < 0) break;
+            total += n;
+        }
+        return total;
     }
 
     private static void close(Closeable c) {
