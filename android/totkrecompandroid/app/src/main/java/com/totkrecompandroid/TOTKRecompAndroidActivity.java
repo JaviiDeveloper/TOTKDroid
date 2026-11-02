@@ -276,12 +276,12 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
     }
 
     // ---- NSP file import (the setup's "NSP file" source: base .nsp + update .nsp + prod.keys → exefs/ + romfs.bin) ----
-    private static volatile Uri pendingBaseNspUri;    // the picked base game .nsp
-    private static volatile Uri pendingUpdateNspUri;  // the picked update .nsp
-    private static volatile Uri pendingKeysUri;       // persisted prod.keys URI (reused across setups)
+    // Three independent pickers: base NSP, update NSP, prod.keys. Extraction starts when all three are set.
+    private static volatile Uri pendingBaseNspUri;
+    private static volatile Uri pendingUpdateNspUri;
+    private static volatile Uri pendingKeysUri;
 
-    public static void pickNspFile() {
-        // Sequential flow: first pick the base game NSP
+    public static void pickBaseNspFile() {
         self.runOnUiThread(() -> {
             try {
                 Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -290,27 +290,24 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
                 self.startActivityForResult(i, REQ_BASE_NSP);
             } catch (Exception e) {
                 Log.e(TAG, "base NSP file picker: " + e);
-                nativeImportDone(1);
             }
         });
     }
 
-    private static void pickUpdateNspFile() {
+    public static void pickUpdateNspFile() {
         self.runOnUiThread(() -> {
             try {
-                android.widget.Toast.makeText(self, "Now choose the update NSP", android.widget.Toast.LENGTH_LONG).show();
                 Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
                 i.addCategory(Intent.CATEGORY_OPENABLE);
                 i.setType("*/*");
                 self.startActivityForResult(i, REQ_UPDATE_NSP);
             } catch (Exception e) {
                 Log.e(TAG, "update NSP file picker: " + e);
-                nativeImportDone(1);
             }
         });
     }
 
-    private static void pickKeysFile() {
+    public static void pickKeysFile() {
         self.runOnUiThread(() -> {
             try {
                 Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -319,9 +316,19 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
                 self.startActivityForResult(i, REQ_KEYS_FILE);
             } catch (Exception e) {
                 Log.e(TAG, "keys file picker: " + e);
-                nativeImportDone(1);
             }
         });
+    }
+
+    private void tryStartNspImport() {
+        // Resolve keys: use picked URI, or local copy, or nothing yet
+        if (pendingKeysUri == null) {
+            File localKeys = new File(getExternalFilesDir(null), "prod.keys");
+            if (localKeys.exists()) pendingKeysUri = Uri.fromFile(localKeys);
+        }
+        if (pendingBaseNspUri != null && pendingUpdateNspUri != null && pendingKeysUri != null) {
+            importNsp(pendingBaseNspUri, pendingUpdateNspUri, pendingKeysUri);
+        }
     }
 
     // Called once base NSP, update NSP, and keys are all available
@@ -552,32 +559,23 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
         }
         if (req == REQ_BASE_NSP) {
             Uri f = result == Activity.RESULT_OK && data != null ? data.getData() : null;
-            if (f == null) { nativeImportDone(1); return; }
+            if (f == null) return;
             pendingBaseNspUri = f;
-            pickUpdateNspFile(); // next: ask for the update NSP
+            android.widget.Toast.makeText(this, "Base game NSP selected", android.widget.Toast.LENGTH_SHORT).show();
+            tryStartNspImport();
             return;
         }
         if (req == REQ_UPDATE_NSP) {
             Uri f = result == Activity.RESULT_OK && data != null ? data.getData() : null;
-            if (f == null) { nativeImportDone(1); return; }
+            if (f == null) return;
             pendingUpdateNspUri = f;
-            // Now check for prod.keys
-            if (pendingKeysUri != null) {
-                importNsp(pendingBaseNspUri, pendingUpdateNspUri, pendingKeysUri);
-            } else {
-                File localKeys = new File(getExternalFilesDir(null), "prod.keys");
-                if (localKeys.exists()) {
-                    pendingKeysUri = Uri.fromFile(localKeys);
-                    importNsp(pendingBaseNspUri, pendingUpdateNspUri, pendingKeysUri);
-                } else {
-                    pickKeysFile();
-                }
-            }
+            android.widget.Toast.makeText(this, "Update NSP selected", android.widget.Toast.LENGTH_SHORT).show();
+            tryStartNspImport();
             return;
         }
         if (req == REQ_KEYS_FILE) {
             Uri f = result == Activity.RESULT_OK && data != null ? data.getData() : null;
-            if (f == null) { nativeImportDone(1); return; }
+            if (f == null) return;
             pendingKeysUri = f;
             // Copy keys to local storage for reuse
             try {
@@ -588,9 +586,8 @@ public class TOTKRecompAndroidActivity extends SDLActivity {
             } catch (Exception e) {
                 Log.w(TAG, "couldn't save prod.keys locally: " + e);
             }
-            if (pendingBaseNspUri != null && pendingUpdateNspUri != null) {
-                importNsp(pendingBaseNspUri, pendingUpdateNspUri, pendingKeysUri);
-            }
+            android.widget.Toast.makeText(this, "prod.keys selected", android.widget.Toast.LENGTH_SHORT).show();
+            tryStartNspImport();
             return;
         }
         if (req == REQ_LOG) {

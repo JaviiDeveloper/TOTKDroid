@@ -2141,12 +2141,20 @@ extern "C" void launcher_run(const char *root) {
                 if (busy) opt_disable_next();
 #ifdef __ANDROID__
                 if (g_settings.files_from_nsp) {
-                    if (opt_action("NSP files", src_v.c_str(),
-                                   "Choose the base game NSP and the update NSP (v1.4.3) of The Legend of Zelda: "
-                                   "Tears of the Kingdom. TOTKDroid will ask for each one in turn, then decrypt and "
-                                   "extract the game files using your prod.keys.\n\n"
+                    if (busy) opt_disable_next();
+                    if (opt_action("Base game NSP", src_v.c_str(),
+                                   "Choose the base game NSP of The Legend of Zelda: Tears of the Kingdom.\n\n"
                                    "The game isn't included with TOTKDroid.", true))
-                        android_call("pickNspFile");
+                        android_call("pickBaseNspFile");
+                    if (busy) opt_disable_next();
+                    if (opt_action("Update NSP", src_v.c_str(),
+                                   "Choose the update NSP (v1.4.3) of The Legend of Zelda: Tears of the Kingdom.", true))
+                        android_call("pickUpdateNspFile");
+                    if (busy) opt_disable_next();
+                    if (opt_action("prod.keys", src_v.c_str(),
+                                   "Choose your prod.keys file with the console's decryption keys. "
+                                   "TOTKDroid saves it locally after the first time.", true))
+                        android_call("pickKeysFile");
                 } else {
                     if (opt_action("Game files folder", src_v.c_str(), src_d.c_str(), true))
                         android_call(g_settings.files_in_place ? "pickGameFolderInPlace" : "pickGameFolder");
